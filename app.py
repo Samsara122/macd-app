@@ -6,6 +6,19 @@ import datetime
 from zoneinfo import ZoneInfo
 
 # ==========================================
+# 0. セッション状態（データ保持）の初期化
+# ==========================================
+# これにより、銘柄をタップして画面が再描画されてもスクリーニング結果が消えなくなります
+if 'calc_ticker' not in st.session_state:
+    st.session_state.calc_ticker = 'XOM'
+if 'screening_run' not in st.session_state:
+    st.session_state.screening_run = False
+if 'hit_tickers' not in st.session_state:
+    st.session_state.hit_tickers = []
+if 'last_scan_date' not in st.session_state:
+    st.session_state.last_scan_date = ""
+
+# ==========================================
 # 1. ページの基本設定
 # ==========================================
 st.set_page_config(page_title="トレード検証＆探索アプリ", layout="wide")
@@ -28,7 +41,6 @@ def get_sp500():
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
-    # NASDAQ100の構成銘柄（確実な固定リストを使用）
     return ['AAPL', 'ABNB', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD', 
             'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG', 'BKR', 'CCEP', 
             'CDNS', 'CDW', 'CEG', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CRWD', 'CSCO', 'CSGP', 
@@ -109,7 +121,8 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
 # 2. サイドバー（検証タブ用の設定）
 # ==========================================
 st.sidebar.header('⚙️ 検証タブ用 基本設定')
-ticker = st.sidebar.text_input('検証する銘柄コード (例: XOM, AAPL)', value='XOM')
+# セッション状態(calc_ticker)と連動させることで、プログラム側から値を書き換え可能にします
+ticker = st.sidebar.text_input('検証する銘柄コード (例: XOM, AAPL)', key='calc_ticker')
 days_later = st.sidebar.slider('何日後のリターンを計算する？', min_value=1, max_value=30, value=5)
 period = st.sidebar.selectbox('データ取得期間', ['6mo', '1y', '2y', '5y', 'max'], index=1)
 
@@ -207,7 +220,7 @@ with tab1:
                     ax3.axhline(70, color='red', linestyle='--', alpha=0.5, label='Overbought (70)')
                     ax3.axhline(30, color='green', linestyle='--', alpha=0.5, label='Oversold (30)')
                     ax3.axhline(rsi_threshold, color='orange', linestyle=':', alpha=0.8, label=f'Your Threshold ({rsi_threshold})')
-                    ax3.set_xlabel('Date')
+                    st.set_xlabel('Date')
                     ax3.set_ylabel('RSI')
                     ax3.set_ylim(0, 100)
                     ax3.legend(loc='upper left')
@@ -282,17 +295,45 @@ with tab2:
                     scan_rsi_period=scan_rsi_period, 
                     date_str=today_str
                 )
+                # スクリーニング実行状態と結果をセッションに保存
+                st.session_state.hit_tickers = hit_tickers
+                st.session_state.screening_run = True
+                st.session_state.last_scan_date = today_str
+
+    # -----------------------------------
+    # 結果表示とタップ自動連携処理
+    # -----------------------------------
+    if st.session_state.screening_run:
+        hit_tickers = st.session_state.hit_tickers
+        if hit_tickers:
+            st.success(f"🎉 厳しい条件をクリアした {len(hit_tickers)} 件のお宝銘柄が見つかりました！")
+            st.info("💡 **テーブル内の銘柄行を直接タップ（クリック）** すると、サイドバーの「検証する銘柄コード」に自動入力されます。")
             
-            if hit_tickers:
-                st.success(f"🎉 厳しい条件をクリアした {len(hit_tickers)} 件のお宝銘柄が見つかりました！")
+            df_hits = pd.DataFrame(hit_tickers)
+            df_hits['最新株価($)'] = df_hits['最新株価($)'].round(2)
+            df_hits['最新RSI'] = df_hits['最新RSI'].round(1)
+            df_hits['MACD'] = df_hits['MACD'].round(3)
+            df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
+            
+            # テーブル（選択イベント付き）を描画
+            event = st.dataframe(
+                df_hits, 
+                use_container_width=True,
+                on_select="rerun", # タップ時にプログラムを動かす設定
+                selection_mode="single_row", # 1行のみ選択可能にする
+                key="screening_results"
+            )
+            
+            # 行がタップ選択された時の自動反映処理
+            if event.selection.rows:
+                selected_row = event.selection.rows[0]
+                selected_ticker = df_hits.iloc[selected_row]['銘柄コード']
                 
-                df_hits = pd.DataFrame(hit_tickers)
-                df_hits['最新株価($)'] = df_hits['最新株価($)'].round(2)
-                df_hits['最新RSI'] = df_hits['最新RSI'].round(1)
-                df_hits['MACD'] = df_hits['MACD'].round(3)
-                df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
-                
-                st.dataframe(df_hits, use_container_width=True)
-                st.markdown("💡 **キャッシュの仕組み:** 米国東部時間（ニューヨーク）で日付が変わるまでは、再度ボタンを押しても一瞬でこの結果を再表示します。")
-            else:
-                st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
+                # 新しく選択された銘柄が現在の検証用と異なれば、書き換えて画面を即リロード
+                if st.session_state.calc_ticker != selected_ticker:
+                    st.session_state.calc_ticker = selected_ticker
+                    st.rerun()
+            
+            st.markdown(f"💡 **キャッシュの仕組み:** 米国東部時間（ニューヨーク）で日付が変わるまでは、再度ボタンを押しても一瞬でこの結果を再表示します。({st.session_state.last_scan_date}時点のデータ)")
+        else:
+            st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
