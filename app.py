@@ -220,7 +220,7 @@ with tab1:
                     ax3.axhline(70, color='red', linestyle='--', alpha=0.5, label='Overbought (70)')
                     ax3.axhline(30, color='green', linestyle='--', alpha=0.5, label='Oversold (30)')
                     ax3.axhline(rsi_threshold, color='orange', linestyle=':', alpha=0.8, label=f'Your Threshold ({rsi_threshold})')
-                    st.set_xlabel('Date')
+                    ax3.set_xlabel('Date')
                     ax3.set_ylabel('RSI')
                     ax3.set_ylim(0, 100)
                     ax3.legend(loc='upper left')
@@ -319,8 +319,8 @@ with tab2:
             event = st.dataframe(
                 df_hits, 
                 use_container_width=True,
-                on_select="rerun", # タップ時にプログラムを動かす設定
-                selection_mode="single_row", # 1行のみ選択可能にする
+                on_select="rerun", 
+                selection_mode="single-row", # ← ★ココを single_row から single-row に修正しました！
                 key="screening_results"
             )
             
