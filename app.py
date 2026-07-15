@@ -40,7 +40,6 @@ def get_sp500():
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
-    # NASDAQ100の構成銘柄（確実な固定リストを使用）
     return ['AAPL', 'ABNB', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD', 
             'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG', 'BKR', 'CCEP', 
             'CDNS', 'CDW', 'CEG', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CRWD', 'CSCO', 'CSGP', 
@@ -65,8 +64,15 @@ def get_dow30():
 def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
     hit_tickers = []
     
-    # 助走期間を確保するため、取得期間を「1年間(1y)」に設定
-    raw_data = yf.download(ticker_list, period='1y', group_by='ticker', threads=True)
+    # 【軽量化】取得期間を1yから6mo（6ヶ月）に短縮し、無駄な付随データ取得(progress, auto_adjust等)をオフに
+    raw_data = yf.download(
+        ticker_list, 
+        period='6mo', 
+        group_by='ticker', 
+        threads=True, 
+        progress=False, 
+        auto_adjust=True
+    )
     
     for t in ticker_list:
         try:
@@ -80,44 +86,53 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             if scan_data.empty or len(scan_data) < 30:
                 continue
             
-            exp1 = scan_data['Close'].ewm(span=12, adjust=False).mean()
-            exp2 = scan_data['Close'].ewm(span=26, adjust=False).mean()
-            scan_data['MACD'] = exp1 - exp2
-            scan_data['Signal'] = scan_data['MACD'].ewm(span=9, adjust=False).mean()
+            # 高速な計算（Closeのみを使用）
+            close_prices = scan_data['Close']
+            exp1 = close_prices.ewm(span=12, adjust=False).mean()
+            exp2 = close_prices.ewm(span=26, adjust=False).mean()
+            macd = exp1 - exp2
+            signal = macd.ewm(span=9, adjust=False).mean()
             
-            delta = scan_data['Close'].diff()
+            delta = close_prices.diff()
             gain = delta.clip(lower=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
             rs = gain / loss
-            scan_data['RSI'] = 100 - (100 / (1 + rs))
+            rsi = 100 - (100 / (1 + rs))
             
-            latest = scan_data.iloc[-1]
-            prev = scan_data.iloc[-2]
+            # 判定用に必要な指標のみを抽出
+            latest_idx = -1
+            prev_idx = -2
+            
+            latest_rsi = rsi.iloc[latest_idx]
+            latest_macd = macd.iloc[latest_idx]
+            latest_sig = signal.iloc[latest_idx]
+            
+            prev_macd = macd.iloc[prev_idx]
+            prev_sig = signal.iloc[prev_idx]
             
             # 共通条件：RSIが基準値以下であること
-            cond_rsi = latest['RSI'] <= scan_rsi_threshold
+            cond_rsi = latest_rsi <= scan_rsi_threshold
             
             # 「クロス直前(しそう)」の条件
-            cond_under = latest['MACD'] < latest['Signal']
-            diff_latest = latest['Signal'] - latest['MACD']
-            diff_prev = prev['Signal'] - prev['MACD']
+            cond_under = latest_macd < latest_sig
+            diff_latest = latest_sig - latest_macd
+            diff_prev = prev_sig - prev_macd
             cond_closing = diff_latest < diff_prev
-            cond_macd_up = latest['MACD'] > prev['MACD']
+            cond_macd_up = latest_macd > prev_macd
             is_approaching = cond_under and cond_closing and cond_macd_up
             
             # 「クロス直後(した)」の条件
-            is_crossed = (latest['MACD'] > latest['Signal']) and (prev['MACD'] <= prev['Signal'])
+            is_crossed = (latest_macd > latest_sig) and (prev_macd <= prev_sig)
             
-            # どちらかの条件を満たしていればリストに追加
             if cond_rsi and (is_approaching or is_crossed):
                 status = "🟢 クロス直後!" if is_crossed else "🟡 クロス直前"
                 hit_tickers.append({
                     '銘柄コード': t,
                     '状態': status,
-                    '最新株価($)': float(latest['Close']),
-                    '最新RSI': float(latest['RSI']),
-                    'MACD': float(latest['MACD']),
-                    'シグナル線': float(latest['Signal'])
+                    '最新株価($)': float(close_prices.iloc[latest_idx]),
+                    '最新RSI': float(latest_rsi),
+                    'MACD': float(latest_macd),
+                    'シグナル線': float(latest_sig)
                 })
         except Exception:
             pass
@@ -157,7 +172,6 @@ with tab1:
     if st.button('検証スタート！', key='backtest_btn'):
         with st.spinner(f'{ticker} のデータを取得・計算中...'):
             
-            # --- 助走期間(ウォームアップ)として6ヶ月多めに取得する処理 ---
             today_date = datetime.datetime.now(ZoneInfo("America/New_York")).date()
             if period == 'max':
                 data = yf.Ticker(ticker).history(period='max')
@@ -165,28 +179,25 @@ with tab1:
             else:
                 if period.endswith('mo'):
                     months = int(period.replace('mo', ''))
-                    start_date = today_date - pd.DateOffset(months=months + 6) # 指定月数 + 6ヶ月
+                    start_date = today_date - pd.DateOffset(months=months + 6) # 指定月数 + 6ヶ月の助走
                     valid_start_date = today_date - pd.DateOffset(months=months)
                 elif period.endswith('y'):
                     years = int(period.replace('y', ''))
-                    start_date = today_date - pd.DateOffset(years=years, months=6) # 指定年数 + 6ヶ月
+                    start_date = today_date - pd.DateOffset(years=years, months=6) # 指定年数 + 6ヶ月の助走
                     valid_start_date = today_date - pd.DateOffset(years=years)
                 
                 data = yf.Ticker(ticker).history(start=start_date.strftime('%Y-%m-%d'))
-            # -----------------------------------------------------------
             
             if data.empty:
                 st.error("データの取得に失敗しました。銘柄コードを確認してください。")
             else:
                 data.index = data.index.tz_localize(None)
                 
-                # MACDの計算 (十分な履歴があるので最初の方もズレない)
                 exp1 = data['Close'].ewm(span=12, adjust=False).mean()
                 exp2 = data['Close'].ewm(span=26, adjust=False).mean()
                 data['MACD'] = exp1 - exp2
                 data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
                 
-                # RSIの計算
                 delta = data['Close'].diff()
                 gain = delta.clip(lower=0).ewm(alpha=1/rsi_period, adjust=False).mean()
                 loss = -delta.clip(upper=0).ewm(alpha=1/rsi_period, adjust=False).mean()
@@ -206,10 +217,8 @@ with tab1:
                 elif '4. RSIが基準値以下' in strategy:
                     data['Buy_Signal'] = rsi_is_low
                 
-                # --- 助走期間のデータを切り捨てて、指定された検証期間だけにする ---
                 if valid_start_date is not None:
                     data = data[data.index >= pd.to_datetime(valid_start_date)]
-                # -----------------------------------------------------------
                 
                 data['Price_Later'] = data['Close'].shift(-days_later)
                 data['Return_(%)'] = ((data['Price_Later'] - data['Close']) / data['Close']) * 100
