@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
-import requests
 
 # ==========================================
 # 1. ページの基本設定
@@ -14,45 +13,41 @@ st.title('📈 トレード戦略 検証＆探索アプリ (MACD & RSI)')
 tab1, tab2 = st.tabs(["📊 過去の勝率検証 (単一銘柄)", "🔎 今日のチャンス探索 (大量スクリーニング)"])
 
 # ==========================================
-# 自動リスト取得用の関数（キャッシュ化して高速化）
+# 自動リスト取得用の関数（確実なデータソースに変更）
 # ==========================================
-@st.cache_data(ttl=86400) # 1日（86400秒）キャッシュを保持して動作を軽くする
+@st.cache_data(ttl=86400)
 def get_sp500():
     try:
-        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-        # ロボットとして弾かれないようにUser-Agentを設定
-        html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}).text
-        tables = pd.read_html(html)
-        # BRK.Bなどがyfinanceでエラーになるため . を - に置換
-        return [t.replace('.', '-') for t in tables[0]['Symbol'].tolist()]
-    except Exception as e:
-        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL']
+        # 弾かれやすいWikipediaを諦め、開発者用の公開データ（CSV）から直接読み込む
+        url = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv'
+        df = pd.read_csv(url)
+        return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
+    except Exception:
+        try:
+            url = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv'
+            df = pd.read_csv(url)
+            return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
+        except Exception:
+            return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'JPM', 'V', 'JNJ']
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
     try:
-        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-        html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}).text
-        tables = pd.read_html(html)
-        for df in tables:
-            if 'Ticker' in df.columns:
-                return df['Ticker'].tolist()
-        return []
-    except Exception as e:
-        return []
+        # NASDAQ100の公開データ
+        url = 'https://raw.githubusercontent.com/datasets/nasdaq-100/main/data/constituents.csv'
+        df = pd.read_csv(url)
+        return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
+    except Exception:
+        # 万が一取得できない場合の代表的なハイテク銘柄リスト
+        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'TSLA', 'GOOGL', 'GOOG', 'AVGO', 'ADBE', 
+                'COST', 'PEP', 'CSCO', 'TMUS', 'NFLX', 'AMD', 'CMCSA', 'INTU', 'INTC', 'AMGN']
 
 @st.cache_data(ttl=86400)
 def get_dow30():
-    try:
-        url = 'https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average'
-        html = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}).text
-        tables = pd.read_html(html)
-        for df in tables:
-            if 'Symbol' in df.columns:
-                return df['Symbol'].tolist()
-        return []
-    except Exception as e:
-        return []
+    # ダウ30種は構成銘柄がほぼ変わらないため、エラーが起きないよう確実な固定リストを使用
+    return ['AAPL', 'AMGN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS', 'DOW', 
+            'GS', 'HD', 'HON', 'IBM', 'INTC', 'JNJ', 'JPM', 'KO', 'MCD', 'MMM', 
+            'MRK', 'MSFT', 'NKE', 'PG', 'TRV', 'UNH', 'V', 'VZ', 'WBA', 'WMT']
 
 # ==========================================
 # 2. サイドバー（検証タブ用の設定）
@@ -188,7 +183,7 @@ with tab2:
     # ターゲット選択
     target_group = st.radio(
         "スクリーニング対象のリストを選択してください",
-        ("🇺🇸 S&P 500 (約500銘柄)", "🇺🇸 NASDAQ 100 (ハイテク100銘柄)", "🇺🇸 ダウ30種 (主要30銘柄)", "✍️ 自分で入力する"),
+        ("🇺🇸 S&P 500 (約500銘柄)", "🇺🇸 NASDAQ 100 (ハイテク代表銘柄)", "🇺🇸 ダウ30種 (主要30銘柄)", "✍️ 自分で入力する"),
         horizontal=True
     )
     
@@ -200,7 +195,7 @@ with tab2:
     elif target_group == "🇺🇸 S&P 500 (約500銘柄)":
         ticker_list = get_sp500()
         st.info(f"S&P 500 構成銘柄 ({len(ticker_list)}銘柄) をスキャンします。※完了まで1〜2分かかります。")
-    elif target_group == "🇺🇸 NASDAQ 100 (ハイテク100銘柄)":
+    elif target_group == "🇺🇸 NASDAQ 100 (ハイテク代表銘柄)":
         ticker_list = get_ndx100()
         st.info(f"NASDAQ 100 構成銘柄 ({len(ticker_list)}銘柄) をスキャンします。")
     elif target_group == "🇺🇸 ダウ30種 (主要30銘柄)":
@@ -297,4 +292,3 @@ with tab2:
                 st.markdown("💡 **次のアクション:** 上記の銘柄を「過去の勝率検証」タブに入力して銘柄ごとの勝率を確かめるか、実際のチャートで形を確認してください！")
             else:
                 st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
-
