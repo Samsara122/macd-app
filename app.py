@@ -8,9 +8,8 @@ from zoneinfo import ZoneInfo
 # ==========================================
 # 0. セッション状態（データ保持）の初期化
 # ==========================================
-# これにより、銘柄をタップして画面が再描画されてもスクリーニング結果が消えなくなります
-if 'calc_ticker' not in st.session_state:
-    st.session_state.calc_ticker = 'XOM'
+if 'target_ticker' not in st.session_state:
+    st.session_state.target_ticker = 'XOM'
 if 'screening_run' not in st.session_state:
     st.session_state.screening_run = False
 if 'hit_tickers' not in st.session_state:
@@ -61,11 +60,10 @@ def get_dow30():
 # ==========================================
 # ★超高速一括スクリーニング関数（キャッシュ機能付き）
 # ==========================================
-@st.cache_data(ttl=86400) # 1日キャッシュ
+@st.cache_data(ttl=86400)
 def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
     hit_tickers = []
     
-    # 500銘柄の3ヶ月分データを1回のAPIコールで一括ダウンロード
     raw_data = yf.download(ticker_list, period='3mo', group_by='ticker', threads=True)
     
     for t in ticker_list:
@@ -80,13 +78,11 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             if scan_data.empty or len(scan_data) < 30:
                 continue
             
-            # MACD
             exp1 = scan_data['Close'].ewm(span=12, adjust=False).mean()
             exp2 = scan_data['Close'].ewm(span=26, adjust=False).mean()
             scan_data['MACD'] = exp1 - exp2
             scan_data['Signal'] = scan_data['MACD'].ewm(span=9, adjust=False).mean()
             
-            # RSI
             delta = scan_data['Close'].diff()
             gain = delta.clip(lower=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
@@ -96,7 +92,6 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             latest = scan_data.iloc[-1]
             prev = scan_data.iloc[-2]
             
-            # 条件判定
             cond_rsi = latest['RSI'] <= scan_rsi_threshold
             cond_under = latest['MACD'] < latest['Signal']
             diff_latest = latest['Signal'] - latest['MACD']
@@ -121,8 +116,11 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
 # 2. サイドバー（検証タブ用の設定）
 # ==========================================
 st.sidebar.header('⚙️ 検証タブ用 基本設定')
-# セッション状態(calc_ticker)と連動させることで、プログラム側から値を書き換え可能にします
-ticker = st.sidebar.text_input('検証する銘柄コード (例: XOM, AAPL)', key='calc_ticker')
+# ★修正ポイント: keyパラメータを外し、valueと独自セッション(target_ticker)で安全に連携します
+input_val = st.sidebar.text_input('検証する銘柄コード (例: XOM, AAPL)', value=st.session_state.target_ticker)
+st.session_state.target_ticker = input_val
+ticker = st.session_state.target_ticker
+
 days_later = st.sidebar.slider('何日後のリターンを計算する？', min_value=1, max_value=30, value=5)
 period = st.sidebar.selectbox('データ取得期間', ['6mo', '1y', '2y', '5y', 'max'], index=1)
 
@@ -249,7 +247,6 @@ with tab2:
     st.markdown('### 🔎 米国株 大量スクリーニング (MACDクロス直前 × RSI売られすぎ)')
     st.markdown('厳しい条件を設定し、膨大な銘柄の中から「まさに今が仕込み時」のお宝銘柄を抽出します。')
     
-    # ターゲット選択
     target_group = st.radio(
         "スクリーニング対象のリストを選択してください",
         ("🇺🇸 S&P 500 (約500銘柄)", "🇺🇸 NASDAQ 100 (ハイテク代表銘柄)", "🇺🇸 ダウ30種 (主要30銘柄)", "✍️ 自分で入力する"),
@@ -279,7 +276,6 @@ with tab2:
     with col2:
         scan_rsi_period = st.number_input('探索条件: RSI の計算期間', value=14, step=1, key='scan_rsi_p')
 
-    # ニューヨーク時間に合わせる
     today_ny = datetime.datetime.now(ZoneInfo("America/New_York")).date()
     today_str = today_ny.strftime('%Y-%m-%d')
 
@@ -288,21 +284,16 @@ with tab2:
             st.warning("銘柄リストが空です。")
         else:
             with st.spinner(f"ニューヨーク時間({today_str})のデータで戦略判定を実行中..."):
-                # 超高速スクリーニング関数を呼び出す
                 hit_tickers = run_fast_screening(
                     ticker_list=ticker_list, 
                     scan_rsi_threshold=scan_rsi_threshold, 
                     scan_rsi_period=scan_rsi_period, 
                     date_str=today_str
                 )
-                # スクリーニング実行状態と結果をセッションに保存
                 st.session_state.hit_tickers = hit_tickers
                 st.session_state.screening_run = True
                 st.session_state.last_scan_date = today_str
 
-    # -----------------------------------
-    # 結果表示とタップ自動連携処理
-    # -----------------------------------
     if st.session_state.screening_run:
         hit_tickers = st.session_state.hit_tickers
         if hit_tickers:
@@ -315,23 +306,21 @@ with tab2:
             df_hits['MACD'] = df_hits['MACD'].round(3)
             df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
             
-            # テーブル（選択イベント付き）を描画
             event = st.dataframe(
                 df_hits, 
                 use_container_width=True,
                 on_select="rerun", 
-                selection_mode="single-row", # ← ★ココを single_row から single-row に修正しました！
+                selection_mode="single-row",
                 key="screening_results"
             )
             
-            # 行がタップ選択された時の自動反映処理
+            # ★タップ時の処理（直接keyをいじるのではなく、安全なtarget_tickerを更新する）
             if event.selection.rows:
                 selected_row = event.selection.rows[0]
                 selected_ticker = df_hits.iloc[selected_row]['銘柄コード']
                 
-                # 新しく選択された銘柄が現在の検証用と異なれば、書き換えて画面を即リロード
-                if st.session_state.calc_ticker != selected_ticker:
-                    st.session_state.calc_ticker = selected_ticker
+                if st.session_state.target_ticker != selected_ticker:
+                    st.session_state.target_ticker = selected_ticker
                     st.rerun()
             
             st.markdown(f"💡 **キャッシュの仕組み:** 米国東部時間（ニューヨーク）で日付が変わるまでは、再度ボタンを押しても一瞬でこの結果を再表示します。({st.session_state.last_scan_date}時点のデータ)")
