@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import datetime
+from zoneinfo import ZoneInfo
 
 # ==========================================
 # 1. ページの基本設定
@@ -44,17 +45,15 @@ def get_dow30():
 # ★超高速一括スクリーニング関数（キャッシュ機能付き）
 # ==========================================
 # 引数に「今日の日付(date_str)」を入れることで、その日の中では1回しか実行されなくなります。
-@st.cache_data(ttl=14400) # 4時間キャッシュ（同じ日でも数時間おきに更新したい場合のため）
+@st.cache_data(ttl=86400) # 1日キャッシュ
 def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
     hit_tickers = []
     
-    # 500銘柄の3ヶ月分データを1回のAPIコールで一括ダウンロード（マルチスレッド有効）
-    # これにより個別にダウンロードするより10倍以上速くなります
+    # 500銘柄の3ヶ月分データを1回のAPIコールで一括ダウンロード
     raw_data = yf.download(ticker_list, period='3mo', group_by='ticker', threads=True)
     
     for t in ticker_list:
         try:
-            # 一括データから該当銘柄のデータを抽出
             if len(ticker_list) == 1:
                 scan_data = raw_data
             else:
@@ -263,14 +262,16 @@ with tab2:
     with col2:
         scan_rsi_period = st.number_input('探索条件: RSI の計算期間', value=14, step=1, key='scan_rsi_p')
 
-    # 今日(現在)の日付を取得してキャッシュの判断基準にする
-    today_str = datetime.date.today().strftime('%Y-%m-%d')
+    # ★★★ ここがニューヨーク時間に修正された部分です ★★★
+    today_ny = datetime.datetime.now(ZoneInfo("America/New_York")).date()
+    today_str = today_ny.strftime('%Y-%m-%d')
+    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
     if st.button('🚀 スクリーニング開始！', type='primary', key='scan_btn'):
         if not ticker_list:
             st.warning("銘柄リストが空です。")
         else:
-            with st.spinner("一括データ取得および戦略判定を実行中..."):
+            with st.spinner(f"ニューヨーク時間({today_str})のデータで戦略判定を実行中..."):
                 # 超高速スクリーニング関数を呼び出す
                 hit_tickers = run_fast_screening(
                     ticker_list=ticker_list, 
@@ -289,6 +290,6 @@ with tab2:
                 df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
                 
                 st.dataframe(df_hits, use_container_width=True)
-                st.markdown("💡 **キャッシュの仕組み:** 今日（JST基準）のうちは、条件を変更しない限り、再度ボタンを押しても一瞬でこの結果を再表示します。")
+                st.markdown("💡 **キャッシュの仕組み:** 米国東部時間（ニューヨーク）で日付が変わるまでは、再度ボタンを押しても一瞬でこの結果を再表示します。")
             else:
                 st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
