@@ -28,12 +28,17 @@ def get_sp500():
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
-    try:
-        url = 'https://raw.githubusercontent.com/datasets/nasdaq-100/main/data/constituents.csv'
-        df = pd.read_csv(url)
-        return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
-    except Exception:
-        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'TSLA', 'GOOGL', 'GOOG', 'AVGO', 'ADBE']
+    # NASDAQ100の構成銘柄（確実な固定リストを使用）
+    return ['AAPL', 'ABNB', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD', 
+            'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG', 'BKR', 'CCEP', 
+            'CDNS', 'CDW', 'CEG', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CRWD', 'CSCO', 'CSGP', 
+            'CSX', 'CTAS', 'CTSH', 'DASH', 'DDOG', 'DLTR', 'DXCM', 'EA', 'EXC', 'FANG', 
+            'FAST', 'FTNT', 'GEHC', 'GILD', 'GOOG', 'GOOGL', 'HON', 'IDXX', 'ILMN', 'INTC', 
+            'INTU', 'ISRG', 'KDP', 'KHC', 'KLAC', 'LRCX', 'LULU', 'MAR', 'MCHP', 'MDLZ', 
+            'MELI', 'META', 'MNST', 'MSTR', 'MU', 'NFLX', 'NXPI', 'ODFL', 'ON', 'ORLY', 
+            'PANW', 'PAYX', 'PCAR', 'PDD', 'PEP', 'PYPL', 'QCOM', 'REGN', 'ROP', 'ROST', 
+            'SBUX', 'SIRI', 'SNPS', 'SPLK', 'TEAM', 'TMUS', 'TSLA', 'TTD', 'TXN', 'VRSK', 
+            'VRTX', 'WBA', 'WBD', 'WDAY', 'XEL', 'ZS']
 
 @st.cache_data(ttl=86400)
 def get_dow30():
@@ -44,7 +49,6 @@ def get_dow30():
 # ==========================================
 # ★超高速一括スクリーニング関数（キャッシュ機能付き）
 # ==========================================
-# 引数に「今日の日付(date_str)」を入れることで、その日の中では1回しか実行されなくなります。
 @st.cache_data(ttl=86400) # 1日キャッシュ
 def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
     hit_tickers = []
@@ -262,10 +266,9 @@ with tab2:
     with col2:
         scan_rsi_period = st.number_input('探索条件: RSI の計算期間', value=14, step=1, key='scan_rsi_p')
 
-    # ★★★ ここがニューヨーク時間に修正された部分です ★★★
+    # ニューヨーク時間に合わせる
     today_ny = datetime.datetime.now(ZoneInfo("America/New_York")).date()
     today_str = today_ny.strftime('%Y-%m-%d')
-    # ★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
     if st.button('🚀 スクリーニング開始！', type='primary', key='scan_btn'):
         if not ticker_list:
