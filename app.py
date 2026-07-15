@@ -40,6 +40,7 @@ def get_sp500():
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
+    # NASDAQ100の構成銘柄（確実な固定リストを使用）
     return ['AAPL', 'ABNB', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD', 
             'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG', 'BKR', 'CCEP', 
             'CDNS', 'CDW', 'CEG', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CRWD', 'CSCO', 'CSGP', 
@@ -64,7 +65,8 @@ def get_dow30():
 def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
     hit_tickers = []
     
-    raw_data = yf.download(ticker_list, period='3mo', group_by='ticker', threads=True)
+    # 助走期間を確保するため、取得期間を「1年間(1y)」に設定
+    raw_data = yf.download(ticker_list, period='1y', group_by='ticker', threads=True)
     
     for t in ticker_list:
         try:
@@ -103,7 +105,7 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             cond_macd_up = latest['MACD'] > prev['MACD']
             is_approaching = cond_under and cond_closing and cond_macd_up
             
-            # 「クロス直後(した)」の条件（昨日は下だったが、今日は上抜けた）
+            # 「クロス直後(した)」の条件
             is_crossed = (latest['MACD'] > latest['Signal']) and (prev['MACD'] <= prev['Signal'])
             
             # どちらかの条件を満たしていればリストに追加
@@ -154,18 +156,37 @@ with tab1:
     
     if st.button('検証スタート！', key='backtest_btn'):
         with st.spinner(f'{ticker} のデータを取得・計算中...'):
-            data = yf.Ticker(ticker).history(period=period)
+            
+            # --- 助走期間(ウォームアップ)として6ヶ月多めに取得する処理 ---
+            today_date = datetime.datetime.now(ZoneInfo("America/New_York")).date()
+            if period == 'max':
+                data = yf.Ticker(ticker).history(period='max')
+                valid_start_date = None
+            else:
+                if period.endswith('mo'):
+                    months = int(period.replace('mo', ''))
+                    start_date = today_date - pd.DateOffset(months=months + 6) # 指定月数 + 6ヶ月
+                    valid_start_date = today_date - pd.DateOffset(months=months)
+                elif period.endswith('y'):
+                    years = int(period.replace('y', ''))
+                    start_date = today_date - pd.DateOffset(years=years, months=6) # 指定年数 + 6ヶ月
+                    valid_start_date = today_date - pd.DateOffset(years=years)
+                
+                data = yf.Ticker(ticker).history(start=start_date.strftime('%Y-%m-%d'))
+            # -----------------------------------------------------------
             
             if data.empty:
                 st.error("データの取得に失敗しました。銘柄コードを確認してください。")
             else:
                 data.index = data.index.tz_localize(None)
                 
+                # MACDの計算 (十分な履歴があるので最初の方もズレない)
                 exp1 = data['Close'].ewm(span=12, adjust=False).mean()
                 exp2 = data['Close'].ewm(span=26, adjust=False).mean()
                 data['MACD'] = exp1 - exp2
                 data['Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
                 
+                # RSIの計算
                 delta = data['Close'].diff()
                 gain = delta.clip(lower=0).ewm(alpha=1/rsi_period, adjust=False).mean()
                 loss = -delta.clip(upper=0).ewm(alpha=1/rsi_period, adjust=False).mean()
@@ -184,6 +205,11 @@ with tab1:
                     data['Buy_Signal'] = macd_cross & rsi_is_low
                 elif '4. RSIが基準値以下' in strategy:
                     data['Buy_Signal'] = rsi_is_low
+                
+                # --- 助走期間のデータを切り捨てて、指定された検証期間だけにする ---
+                if valid_start_date is not None:
+                    data = data[data.index >= pd.to_datetime(valid_start_date)]
+                # -----------------------------------------------------------
                 
                 data['Price_Later'] = data['Close'].shift(-days_later)
                 data['Return_(%)'] = ((data['Price_Later'] - data['Close']) / data['Close']) * 100
@@ -315,7 +341,6 @@ with tab2:
             df_hits['MACD'] = df_hits['MACD'].round(3)
             df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
             
-            # 状態ごとにデータフレームを分割し、インデックスをリセット
             df_crossed = df_hits[df_hits['状態'] == "🟢 クロス直後!"].reset_index(drop=True)
             df_approaching = df_hits[df_hits['状態'] == "🟡 クロス直前"].reset_index(drop=True)
             
@@ -325,7 +350,7 @@ with tab2:
             st.subheader(f"🟢 ゴールデンクロスした直後の銘柄 ({len(df_crossed)}件)")
             if not df_crossed.empty:
                 event_crossed = st.dataframe(
-                    df_crossed.drop(columns=['状態']), # 表示時は「状態」列を隠す
+                    df_crossed.drop(columns=['状態']), 
                     use_container_width=True,
                     on_select="rerun", 
                     selection_mode="single-row",
