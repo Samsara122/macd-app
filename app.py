@@ -92,16 +92,26 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             latest = scan_data.iloc[-1]
             prev = scan_data.iloc[-2]
             
+            # 共通条件：RSIが基準値以下であること
             cond_rsi = latest['RSI'] <= scan_rsi_threshold
+            
+            # 「クロス直前(しそう)」の条件
             cond_under = latest['MACD'] < latest['Signal']
             diff_latest = latest['Signal'] - latest['MACD']
             diff_prev = prev['Signal'] - prev['MACD']
             cond_closing = diff_latest < diff_prev
             cond_macd_up = latest['MACD'] > prev['MACD']
+            is_approaching = cond_under and cond_closing and cond_macd_up
             
-            if cond_rsi and cond_under and cond_closing and cond_macd_up:
+            # 「クロス直後(した)」の条件（昨日は下だったが、今日は上抜けた）
+            is_crossed = (latest['MACD'] > latest['Signal']) and (prev['MACD'] <= prev['Signal'])
+            
+            # どちらかの条件を満たしていればリストに追加
+            if cond_rsi and (is_approaching or is_crossed):
+                status = "🟢 クロス直後!" if is_crossed else "🟡 クロス直前"
                 hit_tickers.append({
                     '銘柄コード': t,
+                    '状態': status,
                     '最新株価($)': float(latest['Close']),
                     '最新RSI': float(latest['RSI']),
                     'MACD': float(latest['MACD']),
@@ -116,7 +126,6 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
 # 2. サイドバー（検証タブ用の設定）
 # ==========================================
 st.sidebar.header('⚙️ 検証タブ用 基本設定')
-# ★修正ポイント: keyパラメータを外し、valueと独自セッション(target_ticker)で安全に連携します
 input_val = st.sidebar.text_input('検証する銘柄コード (例: XOM, AAPL)', value=st.session_state.target_ticker)
 st.session_state.target_ticker = input_val
 ticker = st.session_state.target_ticker
@@ -244,7 +253,7 @@ with tab1:
 # 4. タブ2: 今日のチャンス探索（スクリーニング）
 # ==========================================
 with tab2:
-    st.markdown('### 🔎 米国株 大量スクリーニング (MACDクロス直前 × RSI売られすぎ)')
+    st.markdown('### 🔎 米国株 大量スクリーニング (MACDクロス直前/直後 × RSI売られすぎ)')
     st.markdown('厳しい条件を設定し、膨大な銘柄の中から「まさに今が仕込み時」のお宝銘柄を抽出します。')
     
     target_group = st.radio(
@@ -297,7 +306,7 @@ with tab2:
     if st.session_state.screening_run:
         hit_tickers = st.session_state.hit_tickers
         if hit_tickers:
-            st.success(f"🎉 厳しい条件をクリアした {len(hit_tickers)} 件のお宝銘柄が見つかりました！")
+            st.success(f"🎉 条件をクリアした {len(hit_tickers)} 件のお宝銘柄が見つかりました！")
             st.info("💡 **テーブル内の銘柄行を直接タップ（クリック）** すると、サイドバーの「検証する銘柄コード」に自動入力されます。")
             
             df_hits = pd.DataFrame(hit_tickers)
@@ -306,23 +315,55 @@ with tab2:
             df_hits['MACD'] = df_hits['MACD'].round(3)
             df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
             
-            event = st.dataframe(
-                df_hits, 
-                use_container_width=True,
-                on_select="rerun", 
-                selection_mode="single-row",
-                key="screening_results"
-            )
+            # 状態ごとにデータフレームを分割し、インデックスをリセット
+            df_crossed = df_hits[df_hits['状態'] == "🟢 クロス直後!"].reset_index(drop=True)
+            df_approaching = df_hits[df_hits['状態'] == "🟡 クロス直前"].reset_index(drop=True)
             
-            # ★タップ時の処理（直接keyをいじるのではなく、安全なtarget_tickerを更新する）
-            if event.selection.rows:
-                selected_row = event.selection.rows[0]
-                selected_ticker = df_hits.iloc[selected_row]['銘柄コード']
-                
-                if st.session_state.target_ticker != selected_ticker:
-                    st.session_state.target_ticker = selected_ticker
-                    st.rerun()
+            # -----------------------------------
+            # 🟢 クロス直後の表示
+            # -----------------------------------
+            st.subheader(f"🟢 ゴールデンクロスした直後の銘柄 ({len(df_crossed)}件)")
+            if not df_crossed.empty:
+                event_crossed = st.dataframe(
+                    df_crossed.drop(columns=['状態']), # 表示時は「状態」列を隠す
+                    use_container_width=True,
+                    on_select="rerun", 
+                    selection_mode="single-row",
+                    key="screening_results_crossed"
+                )
+                if event_crossed.selection.rows:
+                    selected_row = event_crossed.selection.rows[0]
+                    selected_ticker = df_crossed.iloc[selected_row]['銘柄コード']
+                    if st.session_state.target_ticker != selected_ticker:
+                        st.session_state.target_ticker = selected_ticker
+                        st.rerun()
+            else:
+                st.write("現在、該当する銘柄はありません。")
+
+            st.markdown("---")
+
+            # -----------------------------------
+            # 🟡 クロス直前の表示
+            # -----------------------------------
+            st.subheader(f"🟡 ゴールデンクロスしそうな銘柄 ({len(df_approaching)}件)")
+            if not df_approaching.empty:
+                event_approaching = st.dataframe(
+                    df_approaching.drop(columns=['状態']), 
+                    use_container_width=True,
+                    on_select="rerun", 
+                    selection_mode="single-row",
+                    key="screening_results_approaching"
+                )
+                if event_approaching.selection.rows:
+                    selected_row = event_approaching.selection.rows[0]
+                    selected_ticker = df_approaching.iloc[selected_row]['銘柄コード']
+                    if st.session_state.target_ticker != selected_ticker:
+                        st.session_state.target_ticker = selected_ticker
+                        st.rerun()
+            else:
+                st.write("現在、該当する銘柄はありません。")
             
+            st.markdown("---")
             st.markdown(f"💡 **キャッシュの仕組み:** 米国東部時間（ニューヨーク）で日付が変わるまでは、再度ボタンを押しても一瞬でこの結果を再表示します。({st.session_state.last_scan_date}時点のデータ)")
         else:
             st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
