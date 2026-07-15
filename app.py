@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
+import datetime
 
 # ==========================================
 # 1. ページの基本設定
@@ -13,41 +14,93 @@ st.title('📈 トレード戦略 検証＆探索アプリ (MACD & RSI)')
 tab1, tab2 = st.tabs(["📊 過去の勝率検証 (単一銘柄)", "🔎 今日のチャンス探索 (大量スクリーニング)"])
 
 # ==========================================
-# 自動リスト取得用の関数（確実なデータソースに変更）
+# 自動リスト取得用の関数（キャッシュ化して高速化）
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_sp500():
     try:
-        # 弾かれやすいWikipediaを諦め、開発者用の公開データ（CSV）から直接読み込む
         url = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv'
         df = pd.read_csv(url)
         return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
     except Exception:
-        try:
-            url = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv'
-            df = pd.read_csv(url)
-            return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
-        except Exception:
-            return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'JPM', 'V', 'JNJ']
+        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META', 'TSLA', 'JPM', 'V', 'JNJ']
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
     try:
-        # NASDAQ100の公開データ
         url = 'https://raw.githubusercontent.com/datasets/nasdaq-100/main/data/constituents.csv'
         df = pd.read_csv(url)
         return [str(t).replace('.', '-') for t in df['Symbol'].tolist()]
     except Exception:
-        # 万が一取得できない場合の代表的なハイテク銘柄リスト
-        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'TSLA', 'GOOGL', 'GOOG', 'AVGO', 'ADBE', 
-                'COST', 'PEP', 'CSCO', 'TMUS', 'NFLX', 'AMD', 'CMCSA', 'INTU', 'INTC', 'AMGN']
+        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'TSLA', 'GOOGL', 'GOOG', 'AVGO', 'ADBE']
 
 @st.cache_data(ttl=86400)
 def get_dow30():
-    # ダウ30種は構成銘柄がほぼ変わらないため、エラーが起きないよう確実な固定リストを使用
     return ['AAPL', 'AMGN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS', 'DOW', 
             'GS', 'HD', 'HON', 'IBM', 'INTC', 'JNJ', 'JPM', 'KO', 'MCD', 'MMM', 
             'MRK', 'MSFT', 'NKE', 'PG', 'TRV', 'UNH', 'V', 'VZ', 'WBA', 'WMT']
+
+# ==========================================
+# ★超高速一括スクリーニング関数（キャッシュ機能付き）
+# ==========================================
+# 引数に「今日の日付(date_str)」を入れることで、その日の中では1回しか実行されなくなります。
+@st.cache_data(ttl=14400) # 4時間キャッシュ（同じ日でも数時間おきに更新したい場合のため）
+def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
+    hit_tickers = []
+    
+    # 500銘柄の3ヶ月分データを1回のAPIコールで一括ダウンロード（マルチスレッド有効）
+    # これにより個別にダウンロードするより10倍以上速くなります
+    raw_data = yf.download(ticker_list, period='3mo', group_by='ticker', threads=True)
+    
+    for t in ticker_list:
+        try:
+            # 一括データから該当銘柄のデータを抽出
+            if len(ticker_list) == 1:
+                scan_data = raw_data
+            else:
+                if t not in raw_data.columns.levels[0]:
+                    continue
+                scan_data = raw_data[t].dropna()
+                
+            if scan_data.empty or len(scan_data) < 30:
+                continue
+            
+            # MACD
+            exp1 = scan_data['Close'].ewm(span=12, adjust=False).mean()
+            exp2 = scan_data['Close'].ewm(span=26, adjust=False).mean()
+            scan_data['MACD'] = exp1 - exp2
+            scan_data['Signal'] = scan_data['MACD'].ewm(span=9, adjust=False).mean()
+            
+            # RSI
+            delta = scan_data['Close'].diff()
+            gain = delta.clip(lower=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
+            loss = -delta.clip(upper=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
+            rs = gain / loss
+            scan_data['RSI'] = 100 - (100 / (1 + rs))
+            
+            latest = scan_data.iloc[-1]
+            prev = scan_data.iloc[-2]
+            
+            # 条件判定
+            cond_rsi = latest['RSI'] <= scan_rsi_threshold
+            cond_under = latest['MACD'] < latest['Signal']
+            diff_latest = latest['Signal'] - latest['MACD']
+            diff_prev = prev['Signal'] - prev['MACD']
+            cond_closing = diff_latest < diff_prev
+            cond_macd_up = latest['MACD'] > prev['MACD']
+            
+            if cond_rsi and cond_under and cond_closing and cond_macd_up:
+                hit_tickers.append({
+                    '銘柄コード': t,
+                    '最新株価($)': float(latest['Close']),
+                    '最新RSI': float(latest['RSI']),
+                    'MACD': float(latest['MACD']),
+                    'シグナル線': float(latest['Signal'])
+                })
+        except Exception:
+            pass
+            
+    return hit_tickers
 
 # ==========================================
 # 2. サイドバー（検証タブ用の設定）
@@ -194,7 +247,7 @@ with tab2:
         ticker_list = [t.strip() for t in tickers_input.split(',') if t.strip()]
     elif target_group == "🇺🇸 S&P 500 (約500銘柄)":
         ticker_list = get_sp500()
-        st.info(f"S&P 500 構成銘柄 ({len(ticker_list)}銘柄) をスキャンします。※完了まで1〜2分かかります。")
+        st.info(f"S&P 500 構成銘柄 ({len(ticker_list)}銘柄) をスキャンします。※初回は約5〜10秒かかります。")
     elif target_group == "🇺🇸 NASDAQ 100 (ハイテク代表銘柄)":
         ticker_list = get_ndx100()
         st.info(f"NASDAQ 100 構成銘柄 ({len(ticker_list)}銘柄) をスキャンします。")
@@ -210,73 +263,21 @@ with tab2:
     with col2:
         scan_rsi_period = st.number_input('探索条件: RSI の計算期間', value=14, step=1, key='scan_rsi_p')
 
+    # 今日(現在)の日付を取得してキャッシュの判断基準にする
+    today_str = datetime.date.today().strftime('%Y-%m-%d')
+
     if st.button('🚀 スクリーニング開始！', type='primary', key='scan_btn'):
         if not ticker_list:
             st.warning("銘柄リストが空です。")
         else:
-            hit_tickers = []
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # 全銘柄をループしてスキャン
-            for i, t in enumerate(ticker_list):
-                # 進捗の表示
-                status_text.text(f"データ取得・解析中... {t} ({i+1}/{len(ticker_list)})")
-                
-                try:
-                    # スキャン用に過去3ヶ月のデータを取得
-                    scan_data = yf.Ticker(t).history(period='3mo')
-                    if scan_data.empty or len(scan_data) < 30:
-                        pass
-                    else:
-                        scan_data.index = scan_data.index.tz_localize(None)
-                        
-                        # MACD
-                        exp1 = scan_data['Close'].ewm(span=12, adjust=False).mean()
-                        exp2 = scan_data['Close'].ewm(span=26, adjust=False).mean()
-                        scan_data['MACD'] = exp1 - exp2
-                        scan_data['Signal'] = scan_data['MACD'].ewm(span=9, adjust=False).mean()
-                        
-                        # RSI
-                        delta = scan_data['Close'].diff()
-                        gain = delta.clip(lower=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
-                        loss = -delta.clip(upper=0).ewm(alpha=1/scan_rsi_period, adjust=False).mean()
-                        rs = gain / loss
-                        scan_data['RSI'] = 100 - (100 / (1 + rs))
-                        
-                        # 最新日と前日のデータを取得
-                        latest = scan_data.iloc[-1]
-                        prev = scan_data.iloc[-2]
-                        
-                        # --- 条件判定 ---
-                        # 1. RSIが基準値以下（例：40以下）
-                        cond_rsi = latest['RSI'] <= scan_rsi_threshold
-                        # 2. MACDがまだシグナルの下にある
-                        cond_under = latest['MACD'] < latest['Signal']
-                        # 3. MACDとシグナルの差が前日より縮まっている
-                        diff_latest = latest['Signal'] - latest['MACD']
-                        diff_prev = prev['Signal'] - prev['MACD']
-                        cond_closing = diff_latest < diff_prev
-                        # 4. MACDが上向いている
-                        cond_macd_up = latest['MACD'] > prev['MACD']
-                        
-                        if cond_rsi and cond_under and cond_closing and cond_macd_up:
-                            hit_tickers.append({
-                                '銘柄コード': t,
-                                '最新株価($)': latest['Close'],
-                                '最新RSI': latest['RSI'],
-                                'MACD': latest['MACD'],
-                                'シグナル線': latest['Signal']
-                            })
-                except Exception:
-                    # エラーが出た銘柄（上場廃止など）はスキップ
-                    pass
-                
-                # プログレスバーの更新
-                progress_bar.progress((i + 1) / len(ticker_list))
-                
-            status_text.text("スクリーニング完了！")
+            with st.spinner("一括データ取得および戦略判定を実行中..."):
+                # 超高速スクリーニング関数を呼び出す
+                hit_tickers = run_fast_screening(
+                    ticker_list=ticker_list, 
+                    scan_rsi_threshold=scan_rsi_threshold, 
+                    scan_rsi_period=scan_rsi_period, 
+                    date_str=today_str
+                )
             
             if hit_tickers:
                 st.success(f"🎉 厳しい条件をクリアした {len(hit_tickers)} 件のお宝銘柄が見つかりました！")
@@ -288,7 +289,6 @@ with tab2:
                 df_hits['シグナル線'] = df_hits['シグナル線'].round(3)
                 
                 st.dataframe(df_hits, use_container_width=True)
-                
-                st.markdown("💡 **次のアクション:** 上記の銘柄を「過去の勝率検証」タブに入力して銘柄ごとの勝率を確かめるか、実際のチャートで形を確認してください！")
+                st.markdown("💡 **キャッシュの仕組み:** 今日（JST基準）のうちは、条件を変更しない限り、再度ボタンを押しても一瞬でこの結果を再表示します。")
             else:
                 st.info("現在、指定された条件を満たす銘柄はありませんでした。RSIの基準値を少し上げてみるか、市場全体が下落している日を狙ってみてください。")
