@@ -40,6 +40,7 @@ def get_sp500():
 
 @st.cache_data(ttl=86400)
 def get_ndx100():
+    # NASDAQ100の構成銘柄（確実な固定リストを使用）
     return ['AAPL', 'ABNB', 'ADBE', 'ADI', 'ADP', 'ADSK', 'AEP', 'ALGN', 'AMAT', 'AMD', 
             'AMGN', 'AMZN', 'ANSS', 'ASML', 'AVGO', 'AZN', 'BIIB', 'BKNG', 'BKR', 'CCEP', 
             'CDNS', 'CDW', 'CEG', 'CHTR', 'CMCSA', 'COST', 'CPRT', 'CRWD', 'CSCO', 'CSGP', 
@@ -61,13 +62,15 @@ def get_dow30():
 # ★超高速一括スクリーニング関数（キャッシュ機能付き）
 # ==========================================
 @st.cache_data(ttl=86400)
-def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str):
+def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_str, use_trend_filter=False, filter_ma_period=200):
     hit_tickers = []
     
-    # 【軽量化】取得期間を1yから6mo（6ヶ月）に短縮し、無駄な付随データ取得(progress, auto_adjust等)をオフに
+    # トレンドフィルターが有効でMA期間が長い場合のみ1年分のデータを取得、それ以外は6ヶ月分で軽量化
+    download_period = '1y' if (use_trend_filter and filter_ma_period >= 100) else '6mo'
+    
     raw_data = yf.download(
         ticker_list, 
-        period='6mo', 
+        period=download_period, 
         group_by='ticker', 
         threads=True, 
         progress=False, 
@@ -86,7 +89,7 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             if scan_data.empty or len(scan_data) < 30:
                 continue
             
-            # 高速な計算（Closeのみを使用）
+            # 指標計算
             close_prices = scan_data['Close']
             exp1 = close_prices.ewm(span=12, adjust=False).mean()
             exp2 = close_prices.ewm(span=26, adjust=False).mean()
@@ -99,7 +102,10 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             rs = gain / loss
             rsi = 100 - (100 / (1 + rs))
             
-            # 判定用に必要な指標のみを抽出
+            # トレンドフィルター用MAの計算
+            if use_trend_filter:
+                scan_data['MA'] = close_prices.rolling(window=filter_ma_period).mean()
+            
             latest_idx = -1
             prev_idx = -2
             
@@ -113,6 +119,14 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             # 共通条件：RSIが基準値以下であること
             cond_rsi = latest_rsi <= scan_rsi_threshold
             
+            # トレンドフィルター条件
+            cond_trend = True
+            if use_trend_filter:
+                if 'MA' in scan_data.columns and not pd.isna(scan_data['MA'].iloc[latest_idx]):
+                    cond_trend = close_prices.iloc[latest_idx] > scan_data['MA'].iloc[latest_idx]
+                else:
+                    cond_trend = False # データ不足の場合は除外
+            
             # 「クロス直前(しそう)」の条件
             cond_under = latest_macd < latest_sig
             diff_latest = latest_sig - latest_macd
@@ -124,16 +138,20 @@ def run_fast_screening(ticker_list, scan_rsi_threshold, scan_rsi_period, date_st
             # 「クロス直後(した)」の条件
             is_crossed = (latest_macd > latest_sig) and (prev_macd <= prev_sig)
             
-            if cond_rsi and (is_approaching or is_crossed):
+            # 判定
+            if cond_rsi and cond_trend and (is_approaching or is_crossed):
                 status = "🟢 クロス直後!" if is_crossed else "🟡 クロス直前"
-                hit_tickers.append({
+                res_dict = {
                     '銘柄コード': t,
                     '状態': status,
                     '最新株価($)': float(close_prices.iloc[latest_idx]),
                     '最新RSI': float(latest_rsi),
                     'MACD': float(latest_macd),
                     'シグナル線': float(latest_sig)
-                })
+                }
+                if use_trend_filter:
+                    res_dict[f'MA({filter_ma_period})'] = float(scan_data['MA'].iloc[latest_idx].round(2))
+                hit_tickers.append(res_dict)
         except Exception:
             pass
             
@@ -159,6 +177,11 @@ strategy = st.sidebar.selectbox('検証するシグナル（買い条件）', [
 ])
 
 st.sidebar.markdown('---')
+st.sidebar.markdown('**📊 移動平均線 (MA) 設定**')
+show_ma = st.sidebar.checkbox('検証チャートにMAを表示', value=True)
+ma_period = st.sidebar.number_input('検証用 MA 期間', value=75, min_value=5, max_value=200, step=1)
+
+st.sidebar.markdown('---')
 st.sidebar.markdown('**パラメータ微調整**')
 rsi_period = st.sidebar.number_input('RSI 期間', value=14, step=1)
 rsi_threshold = st.sidebar.number_input('RSI 基準値 (この数値以下を売られすぎと判断)', value=40, step=1)
@@ -177,13 +200,15 @@ with tab1:
                 data = yf.Ticker(ticker).history(period='max')
                 valid_start_date = None
             else:
+                # 助走期間として、指定された期間にさらに設定したMA期間＋少し多めの期間を足して取得
+                warmup_days = int(ma_period + 30)
                 if period.endswith('mo'):
                     months = int(period.replace('mo', ''))
-                    start_date = today_date - pd.DateOffset(months=months + 6) # 指定月数 + 6ヶ月の助走
+                    start_date = today_date - pd.DateOffset(months=months) - pd.DateOffset(days=warmup_days)
                     valid_start_date = today_date - pd.DateOffset(months=months)
                 elif period.endswith('y'):
                     years = int(period.replace('y', ''))
-                    start_date = today_date - pd.DateOffset(years=years, months=6) # 指定年数 + 6ヶ月の助走
+                    start_date = today_date - pd.DateOffset(years=years) - pd.DateOffset(days=warmup_days)
                     valid_start_date = today_date - pd.DateOffset(years=years)
                 
                 data = yf.Ticker(ticker).history(start=start_date.strftime('%Y-%m-%d'))
@@ -193,6 +218,7 @@ with tab1:
             else:
                 data.index = data.index.tz_localize(None)
                 
+                # 指標計算
                 exp1 = data['Close'].ewm(span=12, adjust=False).mean()
                 exp2 = data['Close'].ewm(span=26, adjust=False).mean()
                 data['MACD'] = exp1 - exp2
@@ -203,6 +229,9 @@ with tab1:
                 loss = -delta.clip(upper=0).ewm(alpha=1/rsi_period, adjust=False).mean()
                 rs = gain / loss
                 data['RSI'] = 100 - (100 / (1 + rs))
+                
+                # 移動平均線の計算
+                data['MA'] = data['Close'].rolling(window=ma_period).mean()
                 
                 macd_cross = (data['MACD'] > data['Signal']) & (data['MACD'].shift(1) <= data['Signal'].shift(1))
                 rsi_rebound = (data['RSI'] > rsi_threshold) & (data['RSI'].shift(1) <= rsi_threshold)
@@ -217,6 +246,7 @@ with tab1:
                 elif '4. RSIが基準値以下' in strategy:
                     data['Buy_Signal'] = rsi_is_low
                 
+                # 助走データをカット
                 if valid_start_date is not None:
                     data = data[data.index >= pd.to_datetime(valid_start_date)]
                 
@@ -243,7 +273,11 @@ with tab1:
                     st.markdown('**チャート推移とシグナル発生ポイント**')
                     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 9), gridspec_kw={'height_ratios': [2, 1, 1]})
                     
+                    # 上段：株価チャート（MA追加）
                     ax1.plot(data.index, data['Close'], label='Close Price', color='black', alpha=0.7)
+                    if show_ma:
+                        ax1.plot(data.index, data['MA'], label=f'{ma_period} MA', color='orange', linestyle='--', alpha=0.8)
+                    
                     signal_dates = signal_events.index
                     signal_prices = signal_events['Close']
                     ax1.scatter(signal_dates, signal_prices, marker='^', color='red', s=100, label='Buy Signal', zorder=5)
@@ -251,6 +285,7 @@ with tab1:
                     ax1.legend()
                     ax1.grid(True)
                     
+                    # 中段：MACD
                     ax2.plot(data.index, data['MACD'], label='MACD', color='blue')
                     ax2.plot(data.index, data['Signal'], label='Signal', color='red', linestyle='--')
                     ax2.axhline(0, color='gray', linestyle='--', alpha=0.5)
@@ -258,6 +293,7 @@ with tab1:
                     ax2.legend(loc='upper left')
                     ax2.grid(True)
                     
+                    # 下段：RSI
                     ax3.plot(data.index, data['RSI'], label=f'RSI ({rsi_period})', color='purple')
                     ax3.axhline(70, color='red', linestyle='--', alpha=0.5, label='Overbought (70)')
                     ax3.axhline(30, color='green', linestyle='--', alpha=0.5, label='Oversold (30)')
@@ -320,6 +356,14 @@ with tab2:
     with col2:
         scan_rsi_period = st.number_input('探索条件: RSI の計算期間', value=14, step=1, key='scan_rsi_p')
 
+    # トレンドフィルター設定
+    st.markdown('**📈 トレードフィルター (ダマシ回避用)**')
+    use_trend_filter = st.checkbox('長期移動平均線 (MA) より上に位置する銘柄のみに絞り込む (上昇トレンド優先)', value=False)
+    if use_trend_filter:
+        filter_ma_period = st.number_input('フィルターに使用する MA 期間 (例: 75, 200)', value=200, min_value=5, max_value=200, step=1)
+    else:
+        filter_ma_period = 200
+
     today_ny = datetime.datetime.now(ZoneInfo("America/New_York")).date()
     today_str = today_ny.strftime('%Y-%m-%d')
 
@@ -332,7 +376,9 @@ with tab2:
                     ticker_list=ticker_list, 
                     scan_rsi_threshold=scan_rsi_threshold, 
                     scan_rsi_period=scan_rsi_period, 
-                    date_str=today_str
+                    date_str=today_str,
+                    use_trend_filter=use_trend_filter,
+                    filter_ma_period=filter_ma_period
                 )
                 st.session_state.hit_tickers = hit_tickers
                 st.session_state.screening_run = True
